@@ -50,9 +50,17 @@ function imgFor(seed) {
   return `https://images.unsplash.com/photo-${seed}?auto=format&fit=crop&w=1200&q=80`;
 }
 
+function fisherYatesShuffle(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 function pickPhotos(n = 3) {
-  const shuffled = [...UNSPLASH_SEEDS].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, n).map(imgFor);
+  return fisherYatesShuffle(UNSPLASH_SEEDS).slice(0, n).map(imgFor);
 }
 
 function generateProfiles(count = 12) {
@@ -217,7 +225,7 @@ function updateOverlays(card, dx, dy) {
 }
 
 function clearOverlays(card) {
-  card.querySelectorAll(".card__overlay").forEach(o => o.style.opacity = "0");
+  card.querySelectorAll(".card__overlay").forEach(o => { o.style.opacity = "0"; });
 }
 
 // Fly the top card off-screen in the given direction, then remove it.
@@ -246,7 +254,7 @@ function flyCard(card, direction) {
   }
 
   // Show the appropriate overlay fully
-  card.querySelectorAll(".card__overlay").forEach(o => o.style.opacity = "0");
+  card.querySelectorAll(".card__overlay").forEach(o => { o.style.opacity = "0"; });
   const ol = card.querySelector(overlaySelector);
   if (ol) ol.style.opacity = "1";
 
@@ -255,17 +263,25 @@ function flyCard(card, direction) {
   card.style.transform  = `translate(${tx}px, ${ty}px) rotate(${rot}deg)`;
   card.style.opacity    = "0";
 
-  card.addEventListener("transitionend", () => {
+  let cleaned = false;
+  function cleanupSwipe() {
+    if (cleaned) return;
+    cleaned = true;
+    clearTimeout(safetyTimer);
     card.remove();
     profiles.shift(); // remove the top profile from state
     isSwiping = false;
-
     if (profiles.length === 0) {
       renderDeck(); // show empty state
     } else {
       attachTopCardHandlers();
     }
-  }, { once: true });
+  }
+
+  card.addEventListener("transitionend", cleanupSwipe, { once: true });
+  // Safety valve: if transitionend never fires (e.g. card already off-screen),
+  // clean up after the animation duration so isSwiping never gets stuck.
+  const safetyTimer = setTimeout(cleanupSwipe, 600);
 }
 
 // Attach pointer + double-tap handlers to the current top card only.
@@ -276,13 +292,14 @@ function attachTopCardHandlers() {
   let startX = 0, startY = 0, currentX = 0, currentY = 0;
   let dragging = false;
   let lastTapTime = 0;
+  const DRAG_START_THRESHOLD = 10; // px — prevents snap-back flicker on quick taps
 
   card.addEventListener("pointerdown", onDown);
 
   function onDown(e) {
     if (isSwiping) return;
 
-    // Double-tap detection (on the image area)
+    // Double-tap detection
     const now = Date.now();
     if (now - lastTapTime < 300) {
       cyclePhoto(card);
@@ -295,10 +312,9 @@ function attachTopCardHandlers() {
     startY = e.clientY;
     currentX = 0;
     currentY = 0;
-    dragging = true;
+    dragging = false; // becomes true only once movement threshold is exceeded
 
     card.setPointerCapture(e.pointerId);
-    card.style.transition = "none";
 
     card.addEventListener("pointermove", onMove);
     card.addEventListener("pointerup",   onUp);
@@ -306,18 +322,25 @@ function attachTopCardHandlers() {
   }
 
   function onMove(e) {
-    if (!dragging) return;
     currentX = e.clientX - startX;
     currentY = e.clientY - startY;
+
+    if (!dragging) {
+      // Don't start the drag until the finger has clearly moved
+      if (Math.hypot(currentX, currentY) < DRAG_START_THRESHOLD) return;
+      dragging = true;
+      card.style.transition = "none";
+    }
+
     const rot = currentX * 0.07;
     card.style.transform = `translate(${currentX}px, ${currentY}px) rotate(${rot}deg)`;
     updateOverlays(card, currentX, currentY);
   }
 
   function onUp() {
-    if (!dragging) return;
-    dragging = false;
     removeListeners();
+    if (!dragging) return; // quick tap — threshold never reached, nothing to snap back
+    dragging = false;
     decideSwipe(card);
   }
 
