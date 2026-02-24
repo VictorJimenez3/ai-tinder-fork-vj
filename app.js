@@ -50,6 +50,11 @@ function imgFor(seed) {
   return `https://images.unsplash.com/photo-${seed}?auto=format&fit=crop&w=1200&q=80`;
 }
 
+function pickPhotos(n = 3) {
+  const shuffled = [...UNSPLASH_SEEDS].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, n).map(imgFor);
+}
+
 function generateProfiles(count = 12) {
   const profiles = [];
   for (let i = 0; i < count; i++) {
@@ -61,7 +66,8 @@ function generateProfiles(count = 12) {
       title: sample(JOBS),
       bio: sample(BIOS),
       tags: pickTags(),
-      img: imgFor(sample(UNSPLASH_SEEDS)),
+      photos: pickPhotos(3),
+      photoIdx: 0,
     });
   }
   return profiles;
@@ -77,72 +83,311 @@ const nopeBtn = document.getElementById("nopeBtn");
 const superLikeBtn = document.getElementById("superLikeBtn");
 
 let profiles = [];
+let isSwiping = false; // guard against simultaneous swipes
+
+// Build a single card DOM node for profile at profiles[idx].
+function buildCard(idx) {
+  const p = profiles[idx];
+
+  const card = document.createElement("article");
+  card.className = "card";
+
+  // — Photo
+  const img = document.createElement("img");
+  img.className = "card__media";
+  img.src = p.photos[p.photoIdx];
+  img.alt = `${p.name} — profile photo`;
+  img.draggable = false;
+
+  // — Photo dots
+  const dots = document.createElement("div");
+  dots.className = "card__dots";
+  p.photos.forEach((_, di) => {
+    const dot = document.createElement("span");
+    dot.className = "card__dot" + (di === p.photoIdx ? " card__dot--active" : "");
+    dots.appendChild(dot);
+  });
+
+  // — Overlays (LIKE / NOPE / SUPER LIKE)
+  const overlayLike = document.createElement("div");
+  overlayLike.className = "card__overlay card__overlay--like";
+  overlayLike.textContent = "LIKE";
+
+  const overlayNope = document.createElement("div");
+  overlayNope.className = "card__overlay card__overlay--nope";
+  overlayNope.textContent = "NOPE";
+
+  const overlaySuper = document.createElement("div");
+  overlaySuper.className = "card__overlay card__overlay--super";
+  overlaySuper.textContent = "SUPER";
+
+  // — Body
+  const body = document.createElement("div");
+  body.className = "card__body";
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "title-row";
+  titleRow.innerHTML = `
+    <h2 class="card__title">${p.name}</h2>
+    <span class="card__age">${p.age}</span>
+  `;
+
+  const meta = document.createElement("div");
+  meta.className = "card__meta";
+  meta.textContent = `${p.title} • ${p.city}`;
+
+  const chips = document.createElement("div");
+  chips.className = "card__chips";
+  p.tags.forEach((t) => {
+    const c = document.createElement("span");
+    c.className = "chip";
+    c.textContent = t;
+    chips.appendChild(c);
+  });
+
+  body.appendChild(titleRow);
+  body.appendChild(meta);
+  body.appendChild(chips);
+
+  card.appendChild(img);
+  card.appendChild(dots);
+  card.appendChild(overlayLike);
+  card.appendChild(overlayNope);
+  card.appendChild(overlaySuper);
+  card.appendChild(body);
+
+  return card;
+}
 
 function renderDeck() {
   deckEl.setAttribute("aria-busy", "true");
   deckEl.innerHTML = "";
 
-  profiles.forEach((p, idx) => {
-    const card = document.createElement("article");
-    card.className = "card";
+  if (profiles.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "deck__empty";
+    empty.innerHTML = `<p>No more profiles!</p><button class="ghost-btn" id="reloadBtn">Start over</button>`;
+    deckEl.appendChild(empty);
+    deckEl.removeAttribute("aria-busy");
+    document.getElementById("reloadBtn").addEventListener("click", resetDeck);
+    return;
+  }
 
-    const img = document.createElement("img");
-    img.className = "card__media";
-    img.src = p.img;
-    img.alt = `${p.name} — profile photo`;
-
-    const body = document.createElement("div");
-    body.className = "card__body";
-
-    const titleRow = document.createElement("div");
-    titleRow.className = "title-row";
-    titleRow.innerHTML = `
-      <h2 class="card__title">${p.name}</h2>
-      <span class="card__age">${p.age}</span>
-    `;
-
-    const meta = document.createElement("div");
-    meta.className = "card__meta";
-    meta.textContent = `${p.title} • ${p.city}`;
-
-    const chips = document.createElement("div");
-    chips.className = "card__chips";
-    p.tags.forEach((t) => {
-      const c = document.createElement("span");
-      c.className = "chip";
-      c.textContent = t;
-      chips.appendChild(c);
-    });
-
-    body.appendChild(titleRow);
-    body.appendChild(meta);
-    body.appendChild(chips);
-
-    card.appendChild(img);
-    card.appendChild(body);
-
-    deckEl.appendChild(card);
+  // Render all cards; profile[0] = nth-child(1) = top of stack via z-index.
+  profiles.forEach((_, idx) => {
+    deckEl.appendChild(buildCard(idx));
   });
 
   deckEl.removeAttribute("aria-busy");
+  attachTopCardHandlers();
+}
+
+// --- Swipe logic ---
+
+const SWIPE_THRESHOLD_X = 80;  // px to trigger like/nope
+const SWIPE_THRESHOLD_Y = -60; // px upward to trigger super like
+
+function getTopCard() {
+  return deckEl.querySelector(".card:not(.card--flying)");
+}
+
+function updateOverlays(card, dx, dy) {
+  const likeOl   = card.querySelector(".card__overlay--like");
+  const nopeOl   = card.querySelector(".card__overlay--nope");
+  const superOl  = card.querySelector(".card__overlay--super");
+
+  // Vertical super-like check takes priority when dragging sharply upward
+  if (dy < -30 && Math.abs(dy) > Math.abs(dx)) {
+    likeOl.style.opacity  = "0";
+    nopeOl.style.opacity  = "0";
+    superOl.style.opacity = Math.min(1, Math.abs(dy) / 80).toFixed(2);
+  } else if (dx > 0) {
+    likeOl.style.opacity  = Math.min(1, dx / 80).toFixed(2);
+    nopeOl.style.opacity  = "0";
+    superOl.style.opacity = "0";
+  } else if (dx < 0) {
+    likeOl.style.opacity  = "0";
+    nopeOl.style.opacity  = Math.min(1, -dx / 80).toFixed(2);
+    superOl.style.opacity = "0";
+  } else {
+    likeOl.style.opacity  = "0";
+    nopeOl.style.opacity  = "0";
+    superOl.style.opacity = "0";
+  }
+}
+
+function clearOverlays(card) {
+  card.querySelectorAll(".card__overlay").forEach(o => o.style.opacity = "0");
+}
+
+// Fly the top card off-screen in the given direction, then remove it.
+function flyCard(card, direction) {
+  if (isSwiping) return;
+  isSwiping = true;
+
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let tx, ty, rot;
+  let overlaySelector;
+
+  switch (direction) {
+    case "like":
+      tx = vw * 1.5; ty = 80; rot = 30;
+      overlaySelector = ".card__overlay--like";
+      break;
+    case "nope":
+      tx = -vw * 1.5; ty = 80; rot = -30;
+      overlaySelector = ".card__overlay--nope";
+      break;
+    case "super":
+      tx = 0; ty = -vh * 1.2; rot = 0;
+      overlaySelector = ".card__overlay--super";
+      break;
+  }
+
+  // Show the appropriate overlay fully
+  card.querySelectorAll(".card__overlay").forEach(o => o.style.opacity = "0");
+  const ol = card.querySelector(overlaySelector);
+  if (ol) ol.style.opacity = "1";
+
+  card.classList.add("card--flying");
+  card.style.transition = "transform 0.45s ease, opacity 0.45s ease";
+  card.style.transform  = `translate(${tx}px, ${ty}px) rotate(${rot}deg)`;
+  card.style.opacity    = "0";
+
+  card.addEventListener("transitionend", () => {
+    card.remove();
+    profiles.shift(); // remove the top profile from state
+    isSwiping = false;
+
+    if (profiles.length === 0) {
+      renderDeck(); // show empty state
+    } else {
+      attachTopCardHandlers();
+    }
+  }, { once: true });
+}
+
+// Attach pointer + double-tap handlers to the current top card only.
+function attachTopCardHandlers() {
+  const card = getTopCard();
+  if (!card) return;
+
+  let startX = 0, startY = 0, currentX = 0, currentY = 0;
+  let dragging = false;
+  let lastTapTime = 0;
+
+  card.addEventListener("pointerdown", onDown);
+
+  function onDown(e) {
+    if (isSwiping) return;
+
+    // Double-tap detection (on the image area)
+    const now = Date.now();
+    if (now - lastTapTime < 300) {
+      cyclePhoto(card);
+      lastTapTime = 0;
+      return;
+    }
+    lastTapTime = now;
+
+    startX = e.clientX;
+    startY = e.clientY;
+    currentX = 0;
+    currentY = 0;
+    dragging = true;
+
+    card.setPointerCapture(e.pointerId);
+    card.style.transition = "none";
+
+    card.addEventListener("pointermove", onMove);
+    card.addEventListener("pointerup",   onUp);
+    card.addEventListener("pointercancel", onCancel);
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    currentX = e.clientX - startX;
+    currentY = e.clientY - startY;
+    const rot = currentX * 0.07;
+    card.style.transform = `translate(${currentX}px, ${currentY}px) rotate(${rot}deg)`;
+    updateOverlays(card, currentX, currentY);
+  }
+
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    removeListeners();
+    decideSwipe(card);
+  }
+
+  function onCancel() {
+    dragging = false;
+    removeListeners();
+    snapBack(card);
+  }
+
+  function removeListeners() {
+    card.removeEventListener("pointermove", onMove);
+    card.removeEventListener("pointerup",   onUp);
+    card.removeEventListener("pointercancel", onCancel);
+  }
+
+  function decideSwipe(card) {
+    const goSuper = currentY < SWIPE_THRESHOLD_Y && Math.abs(currentY) > Math.abs(currentX);
+    if (goSuper) {
+      flyCard(card, "super");
+    } else if (currentX > SWIPE_THRESHOLD_X) {
+      flyCard(card, "like");
+    } else if (currentX < -SWIPE_THRESHOLD_X) {
+      flyCard(card, "nope");
+    } else {
+      snapBack(card);
+    }
+  }
+}
+
+function snapBack(card) {
+  clearOverlays(card);
+  card.style.transition = "transform 0.35s cubic-bezier(.175,.885,.32,1.275), opacity 0.35s ease";
+  card.style.transform  = "";
+  card.style.opacity    = "";
+}
+
+// Cycle through photos on double-tap.
+// The top card is always profiles[0]; no index arg needed.
+function cyclePhoto(card) {
+  const p = profiles[0];
+  if (!p || p.photos.length < 2) return;
+
+  p.photoIdx = (p.photoIdx + 1) % p.photos.length;
+  const img  = card.querySelector(".card__media");
+  img.src    = p.photos[p.photoIdx];
+
+  // Update dots
+  card.querySelectorAll(".card__dot").forEach((dot, di) => {
+    dot.classList.toggle("card__dot--active", di === p.photoIdx);
+  });
+}
+
+// --- Button-triggered swipes ---
+function triggerButtonSwipe(direction) {
+  if (isSwiping) return;
+  const card = getTopCard();
+  if (!card) return;
+  flyCard(card, direction);
 }
 
 function resetDeck() {
+  isSwiping = false;
   profiles = generateProfiles(12);
   renderDeck();
 }
 
-// Controls (intentionally not implemented)
-likeBtn.addEventListener("click", () => {
-  console.log("Like clicked.");
-});
-nopeBtn.addEventListener("click", () => {
-  console.log("Nope clicked.");
-});
-superLikeBtn.addEventListener("click", () => {
-  console.log("Super Like clicked.");
-});
-shuffleBtn.addEventListener("click", resetDeck);
+likeBtn.addEventListener("click",      () => triggerButtonSwipe("like"));
+nopeBtn.addEventListener("click",      () => triggerButtonSwipe("nope"));
+superLikeBtn.addEventListener("click", () => triggerButtonSwipe("super"));
+shuffleBtn.addEventListener("click",   resetDeck);
 
 // Boot
 resetDeck();
